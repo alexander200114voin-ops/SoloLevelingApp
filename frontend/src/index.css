@@ -1,0 +1,118 @@
+@import url('https://fonts.googleapis.com/css2?family=Orbitron:wght@400;500;600;700;800;900&family=Rajdhani:wght@300;400;500;600;700&display=swap');
+
+@tailwind base;
+@tailwind components;
+@tailwind utilities;
+
+@layer base {
+  :root {
+    color-scheme: dark;
+  }
+
+  html,
+  body,
+  #root {
+    height: 100%;
+  }
+
+  body {
+    background-color: #04020a;
+    color: #e9e4ff;
+    font-family: 'Rajdhani', system-ui, sans-serif;
+    -webkit-font-smoothing: antialiased;
+    overflow-x: hidden;
+  }
+
+  /* Custom scrollbar */
+  ::-webkit-scrollbar {
+    width: 8px;
+    height: 8px;
+  }
+  ::-webkit-scrollbar-track {
+    background: #0a0618;
+  }
+  ::-webkit-scrollbar-thumb {
+    background: linear-gradient(180deg, #7c3aed, #a855f7);
+    border-radius: 2px;
+  }
+  ::-webkit-scrollbar-thumb:hover {
+    background: #a855f7;
+  }
+}
+
+@layer components {
+  .hud-panel {
+    @apply relative border border-violet-glow/30 bg-ink-850/80 backdrop-blur-sm;
+    clip-path: polygon(
+      0 12px, 12px 0,
+      calc(100% - 12px) 0, 100% 12px,
+      100% calc(100% - 12px), calc(100% - 12px) 100%,
+      12px 100%, 0 calc(100% - 12px)
+    );
+  }
+
+  .hud-panel::before {
+    content: '';
+    @apply pointer-events-none absolute inset-0;
+    background: linear-gradient(
+      135deg,
+      rgba(168, 85, 247, 0.06) 0%,
+      transparent 40%,
+      transparent 60%,
+      rgba(192, 132, 252, 0.04) 100%
+    );
+  }
+
+  .stat-bar {
+    @apply relative h-2 w-full overflow-hidden bg-ink-700;
+  }
+  .stat-bar-fill {
+    @apply h-full bg-gradient-to-r from-violet-deep to-violet-neon;
+    box-shadow: 0 0 8px rgba(168, 85, 247, 0.7);
+  }
+
+  .btn-hud {
+    @apply relative inline-flex items-center justify-center gap-2 border border-violet-glow/40 bg-violet-deep/10
+           px-4 py-2 font-display text-sm uppercase tracking-[0.18em] text-violet-neon
+           transition-all duration-200 hover:border-violet-glow hover:bg-violet-deep/30 hover:text-white
+           hover:shadow-violet-sm active:scale-95 disabled:cursor-not-allowed disabled:opacity-40;
+  }
+
+  .btn-plus {
+    @apply inline-flex h-7 w-7 items-center justify-center border border-violet-glow/50 bg-violet-deep/20
+           text-violet-neon transition-all duration-150 hover:bg-violet-deep hover:text-white
+           hover:shadow-violet-sm active:scale-90;
+  }
+
+  .chip {
+    @apply inline-flex items-center gap-1.5 border px-2.5 py-1 font-mono text-[11px] uppercase tracking-widest;
+  }
+
+  .grid-bg {
+    background-image:
+      linear-gradient(rgba(168, 85, 247, 0.05) 1px, transparent 1px),
+      linear-gradient(90deg, rgba(168, 85, 247, 0.05) 1px, transparent 1px);
+    background-size: 44px 44px;
+  }
+
+  .text-glow {
+    text-shadow: 0 0 8px rgba(168, 85, 247, 0.6), 0 0 18px rgba(124, 58, 237, 0.4);
+  }
+
+  .divider-glow {
+    background: linear-gradient(90deg, transparent, rgba(168, 85, 247, 0.6), transparent);
+  }
+}
+
+@layer utilities {
+  .corner-tl,
+  .corner-tr,
+  .corner-bl,
+  .corner-br {
+    @apply pointer-events-none absolute h-3 w-3 border-violet-glow;
+  }
+  .corner-tl { @apply left-0 top-0 border-l-2 border-t-2; }
+  .corner-tr { @apply right-0 top-0 border-r-2 border-t-2; }
+  .corner-bl { @apply bottom-0 left-0 border-b-2 border-l-2; }
+  .corner-br { @apply bottom-0 right-0 border-b-2 border-r-2; }
+}
