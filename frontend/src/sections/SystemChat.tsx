@@ -6,17 +6,17 @@ import { Send, Terminal } from 'lucide-react';
 interface Message {
   sender: 'hunter' | 'system';
   text: string;
+  actions?: string[];
 }
 
 export function SystemChat() {
-  const { state } = useGame();
+  const { state, syncWithServer } = useGame();
   const isEn = state.language === 'en';
   const [messages, setMessages] = useState<Message[]>([]);
   const [input, setInput] = useState('');
   const [loading, setLoading] = useState(false);
   const chatEndRef = useRef<HTMLDivElement>(null);
 
-  // Загрузка сохраненной истории чата из реляционной таблицы SQLite бэкенда
   const loadChatHistory = async () => {
     try {
       const res = await fetch('http://127.0.0.1:8000/api/system/chat/history', {
@@ -31,57 +31,45 @@ export function SystemChat() {
     }
   };
 
+  // ИЗМЕНЕНО: один useEffect вместо двух (был баг — двойной вызов)
   useEffect(() => { 
     loadChatHistory(); 
   }, []);
 
+  // ДОБАВЛЕНО: автоскролл к новому сообщению
   useEffect(() => {
-    //if ('speechSynthesis' in window) {
-    //  window.speechSynthesis.getVoices(); // Прогреваем список голосов при входе на вкладку
-    //}
-    loadChatHistory();
-  }, []);
+    chatEndRef.current?.scrollIntoView({ behavior: 'smooth' });
+  }, [messages]);
 
-
-  // Функция синтеза речи (Чеканный бас ИИ Системы)
-    const speakText = (text: string) => {
+  const speakText = (text: string) => {
     if (!('speechSynthesis' in window)) return;
-    window.speechSynthesis.cancel(); // Мгновенно прерываем прошлую речь, если она шла
+    window.speechSynthesis.cancel();
 
-    // Очищаем текст от скобок и логов [СИСТЕМА], чтобы ИИ их не читал
     const cleanText = text
       .replace(/\[.*?\]/g, '')
       .replace(/\(.*?\)/g, '')
       .trim(); 
 
     const utterance = new SpeechSynthesisUtterance(cleanText);
-    
-    // НАСТРОЙКА КРУТОГО АНГЛИЙСКОГО ГОЛОСА
-    utterance.lang = 'en-US'; // Переключаем движок на американский английский
+    // ИЗМЕНЕНО: язык по state.language, а не всегда en-US
+    utterance.lang = isEn ? 'en-US' : 'ru-RU';
     
     const voices = window.speechSynthesis.getVoices();
+    const preferredVoice = voices.find(v => 
+      (isEn && v.lang.startsWith('en') && (v.name.includes('David') || v.name.includes('George') || v.name.includes('Male'))) ||
+      (!isEn && v.lang.startsWith('ru'))
+    ) || voices.find(v => v.lang.startsWith(isEn ? 'en' : 'ru'));
     
-    // Ищем качественные мужские английские голоса в вашей Windows
-    const epicVoice = voices.find(v => 
-      (v.lang.startsWith('en') && v.name.includes('David')) || 
-      (v.lang.startsWith('en') && v.name.includes('George')) ||
-      (v.lang.startsWith('en') && v.name.includes('Male')) ||
-      v.lang.startsWith('en')
-    );
-    
-    if (epicVoice) {
-      utterance.voice = epicVoice;
+    if (preferredVoice) {
+      utterance.voice = preferredVoice;
     }
     
-    // Эпичные Cyberpunk настройки звука:
-    utterance.pitch = 0.45; // Опускаем голос до утробного, тяжелого баса Системы
-    utterance.rate = 0.88;  // Слегка замедляем темп, делая речь властной и весомой
+    utterance.pitch = 0.45;
+    utterance.rate = 0.88;
     
     window.speechSynthesis.speak(utterance);
   };
 
-
-  // Отправка отчета о тренировке ИИ-агенту Ollama
   const handleSend = async (e: React.FormEvent) => {
     e.preventDefault();
     if (!input.trim() || loading) return;
@@ -103,8 +91,12 @@ export function SystemChat() {
       }
       
       const data = await response.json();
-      setMessages((prev) => [...prev, { sender: 'system', text: data.response }]);
-      speakText(data.response); // Запуск голосового движка
+      // ИЗМЕНЕНО: читаем data.reply (а не data.response), плюс data.actions
+      setMessages((prev) => [...prev, { sender: 'system', text: data.reply, actions: data.actions }]);
+      speakText(data.reply);
+      if (data.actions && data.actions.length > 0) {
+        await syncWithServer();
+      }
     } catch (err) {
       setMessages((prev) => [...prev, { sender: 'system', text: '[КРИТИЧЕСКИЙ СБОЙ]: Связь с ядром Монарха разорвана.' }]);
     } finally {
@@ -115,12 +107,21 @@ export function SystemChat() {
   return (
     <Panel title={isEn ? "Monarch Link / AI System" : "Связь с Монархом / ИИ Системы"} code="SYS-CHAT">
       <div className="flex flex-col h-[55vh] border border-purple-900/20 bg-black/40 p-4 rounded">
-        {/* Окно вывода переписки */}
         <div className="flex-1 overflow-y-auto space-y-3 pr-2 mb-4 font-mono text-sm">
           {messages.map((m, idx) => (
             <div key={idx} className={`flex ${m.sender === 'hunter' ? 'justify-end' : 'justify-start'}`}>
               <div className={`max-w-[80%] px-4 py-2.5 border rounded ${m.sender === 'hunter' ? 'border-purple-500/30 bg-purple-950/10 text-gray-200' : 'border-red-500/30 bg-red-950/5 text-purple-400 text-glow'}`}>
                 {m.text}
+                {/* ДОБАВЛЕНО: бейджи применённых действий */}
+                {m.actions && m.actions.length > 0 && (
+                  <div className="mt-2 flex flex-wrap gap-1">
+                    {m.actions.map((a, i) => (
+                      <span key={i} className="text-[10px] px-1.5 py-0.5 border border-emerald-500/40 bg-emerald-500/10 text-emerald-300 rounded">
+                        {a}
+                      </span>
+                    ))}
+                  </div>
+                )}
               </div>
             </div>
           ))}
@@ -132,7 +133,6 @@ export function SystemChat() {
           <div ref={chatEndRef} />
         </div>
         
-        {/* Форма ввода текста */}
         <form onSubmit={handleSend} className="flex gap-2">
           <input 
             type="text" 

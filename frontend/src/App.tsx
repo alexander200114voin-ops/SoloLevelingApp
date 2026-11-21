@@ -12,27 +12,24 @@ import { Gates } from '@/sections/Gates';
 import { ShadowArmy } from '@/sections/ShadowArmy';
 import { AdminPanel } from '@/sections/AdminPanel';
 import { SystemChat } from '@/sections/SystemChat';
-
+import type { TabKey } from '@/game/types';
 import { AlertTriangle, Plus } from 'lucide-react';
 
 function Shell() {
-  const [tab, setTab] = useState<any>('profile');
+  const [tab, setTab] = useState<TabKey>('profile');
   const { state, advanceQuest } = useGame();
   const [penaltyInput, setPenaltyInput] = useState('5');
 
   if (!state) return null;
 
-  // КРИТИЧЕСКИЙ ОВЕРЛЕЙ: ЕСЛИ АКТИВЕН ШТРАФ СИСТЕМЫ
   if (state.daily && state.daily.penalty) {
     const isEn = state.language === 'en';
-    const msg = state.system_message || "";
-    const parts = msg.split(":");
-    // ИЗМЕНЕНО (пункт 2): защита от битого system_message
-    const pKey = parts.length >= 2 ? parts[1] : undefined;
-    const pCurr = parts.length >= 3 ? parseFloat(parts[2] || "0") : 0;
-    const pTarget = parts.length >= 4 ? parseFloat(parts[3] || "100") : 100;
+    // ИЗМЕНЕНО: читаем penalty-поля напрямую, без парсинга system_message.
+    const pKey = state.penaltyQuestKey;
+    const pCurr = state.penaltyProgress ?? 0;
+    const pTarget = state.penaltyTarget ?? 0;
     const penaltyPct = pTarget > 0 ? (pCurr / pTarget) * 100 : 0;
-    const isCorrupted = !pKey;  // ДОБАВЛЕНО: флаг «состояние штрафа повреждено»
+    const isCorrupted = !pKey || pTarget <= 0;
 
     const handleLogPenalty = () => {
       if (!pKey) return;
@@ -65,7 +62,7 @@ function Shell() {
             
             <div className="flex justify-between items-baseline mt-4 mb-1 text-xs">
               <span className="text-gray-500">{isEn ? 'Progress' : 'Выполнено'}</span>
-              <span className="text-red-400 font-bold font-display text-sm">{pCurr || 0} / {pTarget || 100}</span>
+              <span className="text-red-400 font-bold font-display text-sm">{pCurr || 0} / {pTarget || 0}</span>
             </div>
             
             <div className="stat-bar !bg-red-950/40 border border-red-900/30 p-[1px]">
@@ -76,8 +73,6 @@ function Shell() {
             </div>
           </div>
 
-          {/* ИЗМЕНЕНО (пункт 2): если состояние повреждено — показываем сообщение,
-              а не disabled-кнопку. Пользователь не застрянет «молча». */}
           {isCorrupted ? (
             <div className="border border-amber-500/40 bg-amber-500/10 p-3 text-amber-200 font-mono text-xs">
               {isEn
@@ -103,8 +98,6 @@ function Shell() {
               </button>
             </div>
           )}
-          {/* УДАЛЕНО (пункт 3): кнопка «[Admin] Clear Penalty».
-              Админ-сброс — в AdminPanel. */}
         </div>
       </div>
     );

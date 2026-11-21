@@ -1,5 +1,5 @@
 from pydantic import BaseModel
-from typing import List, Optional
+from typing import List, Optional, Literal
 
 class StatsModel(BaseModel):
     strength: int
@@ -36,9 +36,13 @@ class HunterStateModel(BaseModel):
     shadowsOwned: List[str]
     activeShadow: Optional[str] = None
     lastGateDate: Optional[str] = None
+    canRaidToday: bool = True
     daily: DailyModel
     language: str
-    system_message: Optional[str] = None    
+    system_message: Optional[str] = None
+    penaltyQuestKey: Optional[str] = None
+    penaltyProgress: float = 0.0
+    penaltyTarget: float = 0.0
     weight: float = 70.0
     height: float = 170.0
     age: int = 25
@@ -90,3 +94,30 @@ class ShadowDeployRequest(BaseModel):
 
 class NameUpdateRequest(BaseModel):
     name: str
+
+from typing import Literal
+
+class AgentAction(BaseModel):
+    """Одно действие агента."""
+    type: Literal["quest_progress", "update_goal", "create_quest", "update_quest_target"]
+    # Для quest_progress и update_quest_target:
+    key: Optional[str] = None
+    amount: Optional[float] = None
+    new_target: Optional[float] = None  # ДОБАВЛЕНО: для update_quest_target
+    # Для update_goal:
+    goal: Optional[str] = None
+    # Для create_quest:
+    label_ru: Optional[str] = None
+    label_en: Optional[str] = None
+    target: Optional[float] = None
+    unit_ru: Optional[str] = None
+    unit_en: Optional[str] = None
+    quest_type: Optional[str] = None
+
+class AgentResponse(BaseModel):
+    """Полный ответ агента: текст + массив действий."""
+    reply: str
+    actions: List[AgentAction] = []
+
+# ДОБАВЛЕНО: допустимые цели (для валидации update_goal)
+ALLOWED_GOALS = {"strength", "agility", "intelligence", "dexterity", "all-round", "weight-loss", "endurance"}

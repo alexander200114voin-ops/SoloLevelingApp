@@ -209,5 +209,5 @@ export function setActiveShadow(state: HunterState, shadowId: string | null): Hu
 }
 
 export function canEnterGate(state: HunterState, gate: GateDef): boolean {
-  return state.level >= gate.minLevel && state.lastGateDate !== todayStr();
+  return state.level >= gate.minLevel;
 }

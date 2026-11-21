@@ -249,10 +249,10 @@ export function AdminPanel() {
 				  <Plus size={14} /> {isEditing ? (isEn ? "Save System State" : "Сохранить Изменения") : (isEn ? "Inject Directive" : "Внедрить Директиву")}
 				</button>
 				{isEditing && (
-				  <button type="button" onClick={resetForm} class="btn-hud !px-3 !bg-gray-900 hover:!bg-gray-800" title="Cancel Edit">
-					<RotateCcw size={14} class="text-gray-400" />
-				  </button>
-				)}
+          <button type="button" onClick={resetForm} className="btn-hud !px-3 !bg-gray-900 hover:!bg-gray-800" title="Cancel Edit">
+            <RotateCcw size={14} className="text-gray-400" />
+          </button>
+        )}
 			  </div>
 			</form>
 		  </Panel>

@@ -2,6 +2,8 @@ import datetime
 import random
 import math
 import database
+import json
+from schemas import AgentResponse, AgentAction, ALLOWED_GOALS
 
 def get_required_xp(level: int) -> int:
     return 100 + (level - 1) * 60
@@ -23,83 +25,91 @@ def slugify_ru(text: str) -> str:
     return slug if slug else f"quest_{int(datetime.datetime.now().timestamp())}"
 
 def check_daily_rollover(p: dict):
-    
+    """Идеальная синхронизация дат: защищено от ложных штрафов при первом входе"""
     today_str = datetime.date.today().isoformat()
 
-    # Извлекаем текущие квесты из daily_progress
     current_quests = database.get_daily_progress_list()
 
-    if not current_quests or not p.get("last_gate_date"):
-        p["last_gate_date"] = today_str
+    if not current_quests or not p.get("last_rollover_date"):
+        p["last_rollover_date"] = today_str
         p["penalty"] = 0
+        p["penalty_quest_key"] = None
+        p["penalty_progress"] = 0.0
+        p["penalty_target"] = 0.0
         p["system_message"] = "System core stabilized. Daily directives generated."
-        # ИЗМЕНЕНО: sync_daily_progress вместо ручного DELETE/INSERT
         database.sync_daily_progress(p["level"])
         return p
 
-    if p["last_gate_date"] == today_str:
-        # ДОБАВЛЕНО: синхронизация на случай, если админ добавил/удалил квест
+    if p["last_rollover_date"] == today_str:
         database.sync_daily_progress(p["level"])
         return p
 
-    # СМЕНА КАЛЕНДАРНОГО ДНЯ: Начисляем штраф за вчерашний провал
     all_done = all(q["completed"] for q in current_quests)
 
     if not all_done:
         p["penalty"] = 1
-        # Случайный выбор карательного квеста
         penalty_base_quest = random.choice(current_quests)
         penalty_target = math.floor(penalty_base_quest["target"] * 1.25)
-        p["system_message"] = f"PENALTY_ACTIVE:{penalty_base_quest['key']}:0:{penalty_target}"
+        # ИЗМЕНЕНО: penalty-состояние — в отдельные поля
+        p["penalty_quest_key"] = penalty_base_quest["key"]
+        p["penalty_progress"] = 0.0
+        p["penalty_target"] = float(penalty_target)
+        p["system_message"] = "Penalty active. Complete the task."
     else:
         p["penalty"] = 0
+        p["penalty_quest_key"] = None
+        p["penalty_progress"] = 0.0
+        p["penalty_target"] = 0.0
         p["system_message"] = "Daily directives cleared. System stabilizes."
+
         with database.get_db_connection() as conn:
             for q in current_quests:
                 conn.execute(
                     "INSERT INTO daily_history (date, quest_key, final_progress, final_target) VALUES (?,?,?,?)",
-                    (p["last_gate_date"], q["key"], q["progress"], q["target"])
+                    (p["last_rollover_date"], q["key"], q["progress"], q["target"])
                 )
             conn.commit()
 
-    p["last_gate_date"] = today_str
+    p["last_rollover_date"] = today_str
 
-    # Если штрафа нет — генерируем новые квесты на новый день
-    if p["penalty"] == 0:        
+    if p["penalty"] == 0:
         database.sync_daily_progress(p["level"])
 
     return p
+
 
 def advance_quest_progress(p: dict, quest_key: str, amount: float) -> tuple[dict, str]:
     """Учет прогресса с поддержкой выполнения штрафного квеста"""
     # Если активен ШТРАФ
     if p["penalty"] == 1:
-        if p["system_message"] and p["system_message"].startswith("PENALTY_ACTIVE:"):
-            parts = p["system_message"].split(":")
-            # ДОБАВЛЕНО: защита от битого system_message (раньше падало с ValueError)
-            if len(parts) != 4:
-                return p, "System penalty state corrupted."
-            _, p_key, p_curr, p_target = parts
+        p_key = p.get("penalty_quest_key")
+        p_curr = p.get("penalty_progress", 0.0)
+        p_target = p.get("penalty_target", 0.0)
 
-            if quest_key != p_key:
-                return p, f"ACCESS DENIED! Complete the penalty task first: {p_key.upper()}!"
+        if not p_key or p_target <= 0:
+            return p, "Penalty state corrupted. Contact admin."
 
-            new_curr = max(0.0, min(float(p_target), float(p_curr) + amount))
+        if quest_key != p_key:
+            return p, f"ACCESS DENIED! Complete the penalty task first: {p_key.upper()}!"
 
-            # Если штрафной квест закрыт!
-            if new_curr >= float(p_target):
-                p["penalty"] = 0
-                p["system_message"] = "Penalty cleared. Generative daily directives restored."                
-                database.sync_daily_progress(p["level"])
-                return p, "⚡ PENALTY OVER! System access granted. Daily quests generated!"
-            else:
-                p["system_message"] = f"PENALTY_ACTIVE:{p_key}:{new_curr}:{p_target}"
-                return p, f"Penalty progress: {new_curr}/{p_target}"
-        return p, "System penalty state corrupted."
-    
+        new_curr = max(0.0, min(float(p_target), float(p_curr) + amount))
+
+        if new_curr >= float(p_target):
+            p["penalty"] = 0
+            p["penalty_quest_key"] = None
+            p["penalty_progress"] = 0.0
+            p["penalty_target"] = 0.0
+            p["system_message"] = "Penalty cleared. Generative daily directives restored."
+            database.sync_daily_progress(p["level"])
+            return p, "⚡ PENALTY OVER! System access granted. Daily quests generated!"
+        else:
+            p["penalty_progress"] = new_curr
+            return p, f"Penalty progress: {new_curr}/{p_target}"
+
+    # Обычная логика: UPSERT
     with database.get_db_connection() as conn:
         row = conn.execute("SELECT * FROM daily_progress WHERE key = ?", (quest_key,)).fetchone()
-       
+
         if not row:
             g = conn.execute("SELECT * FROM global_registry WHERE key = ?", (quest_key,)).fetchone()
             if not g:
@@ -112,9 +122,8 @@ def advance_quest_progress(p: dict, quest_key: str, amount: float) -> tuple[dict
             conn.commit()
             row = conn.execute("SELECT * FROM daily_progress WHERE key = ?", (quest_key,)).fetchone()
 
-        quest = dict(row)        
-
-        was_completed = quest["completed"] == 1        
+        quest = dict(row)
+        was_completed = quest["completed"] == 1
         new_progress = max(0.0, quest["progress"] + amount)
         new_completed = 1 if new_progress >= quest["target"] else 0
 
@@ -124,7 +133,6 @@ def advance_quest_progress(p: dict, quest_key: str, amount: float) -> tuple[dict
         )
         conn.commit()
 
-        # Награда — только за ПЕРВОЕ достижение target
         if new_completed == 1 and not was_completed:
             p["gold"] += 30
             p, msg = award_xp(p, 40)
@@ -208,7 +216,7 @@ def execute_gate_raid(p: dict, gate: dict) -> tuple[dict, dict]:
             "xp": 0,
             "narrative": f"FAILURE! The [{gate['rank']}-Rank] Dungeon turned against you. You retreated, wounded and lost {gold_loss} Gold."
         }
-        
+    
     p["last_gate_date"] = datetime.date.today().isoformat()
     return p, outcome
 
@@ -232,10 +240,106 @@ def extract_shadow_soldier(p: dict, shadow_id: str, cost: int) -> tuple[dict, bo
 
 def lift_penalty(p: dict) -> dict:
     p["penalty"] = 0
-    # ДОБАВЛЕНО: фиксируем сегодняшнюю дату, чтобы check_daily_rollover
-    # не воспринял это как «смену дня» и не поставил штраф снова.
-    p["last_gate_date"] = datetime.date.today().isoformat()
+    p["penalty_quest_key"] = None
+    p["penalty_progress"] = 0.0
+    p["penalty_target"] = 0.0
+    p["last_rollover_date"] = datetime.date.today().isoformat()
     p["system_message"] = "Penalty lifted. Directives generated."
-    # ИЗМЕНЕНО: sync_daily_progress вместо «пустых» квестов
     database.sync_daily_progress(p["level"])
     return p
+
+
+def parse_agent_response(raw: str) -> AgentResponse | None:
+    """
+    Парсит JSON-ответ LLM. Возвращает AgentResponse или None при ошибке.
+    """
+    try:
+        data = json.loads(raw)
+        return AgentResponse.model_validate(data)
+    except Exception as e:
+        print(f"[AGENT] JSON parse error: {e}")
+        return None
+
+
+def apply_agent_actions(p: dict, actions: list[AgentAction], ai_allowed_keys: list[str], secure_keys: list[str]) -> tuple[dict, list[str]]:
+    """
+    Применяет действия агента к профилю. Возвращает (обновлённый p, список применённых действий).
+    Валидирует: ключ существует, не secure, amount/target в разумных пределах.
+    """
+    applied = []
+    for action in actions:
+        if action.type == "quest_progress":
+            if not action.key or action.amount is None:
+                continue
+            if action.key in secure_keys:
+                applied.append(f"BLOCKED: {action.key} is SECURE")
+                continue
+            if action.key not in ai_allowed_keys:
+                applied.append(f"BLOCKED: {action.key} not AI-controlled")
+                continue
+            if action.amount <= 0 or action.amount > 1000:
+                applied.append(f"BLOCKED: amount {action.amount} out of range")
+                continue
+            p, msg = advance_quest_progress(p, action.key, action.amount)
+            applied.append(f"{action.key.upper()} +{action.amount}")
+
+        elif action.type == "update_goal":
+            if not action.goal or action.goal not in ALLOWED_GOALS:
+                applied.append(f"BLOCKED: goal '{action.goal}' not allowed")
+                continue
+            p["fitness_goal"] = action.goal
+            applied.append(f"GOAL -> {action.goal.upper()}")
+
+        elif action.type == "create_quest":
+            if not action.key or action.key in secure_keys:
+                applied.append(f"BLOCKED: cannot create/overwrite '{action.key}'")
+                continue
+            if not action.label_ru or not action.label_en or not action.target or not action.unit_ru or not action.unit_en or not action.quest_type:
+                applied.append("BLOCKED: create_quest missing fields")
+                continue
+            if action.quest_type not in ("strength", "agility", "intelligence", "dexterity"):
+                applied.append(f"BLOCKED: quest_type '{action.quest_type}' invalid")
+                continue
+            with database.get_db_connection() as conn:
+                existing = conn.execute("SELECT is_ai_controlled FROM global_registry WHERE key = ?", (action.key,)).fetchone()
+                if existing and existing["is_ai_controlled"] == 0:
+                    applied.append(f"BLOCKED: '{action.key}' exists and is SECURE")
+                    continue
+                conn.execute("""
+                    INSERT OR REPLACE INTO global_registry (key, label_ru, label_en, target_base, unit_ru, unit_en, type, is_ai_controlled)
+                    VALUES (?, ?, ?, ?, ?, ?, ?, 1)
+                """, (action.key, action.label_ru, action.label_en, float(action.target), action.unit_ru, action.unit_en, action.quest_type))
+                scaled_target = math.floor(float(action.target) * (1 + (p["level"] - 1) * 0.08))
+                conn.execute("INSERT OR REPLACE INTO daily_progress (key, progress, target, completed) VALUES (?, 0.0, ?, 0)", (action.key, scaled_target))
+                conn.commit()
+            applied.append(f"NEW QUEST: {action.label_en}")
+
+        # ДОБАВЛЕНО: изменение target существующего квеста
+        elif action.type == "update_quest_target":
+            if not action.key or action.new_target is None:
+                applied.append("BLOCKED: update_quest_target missing key/new_target")
+                continue
+            if action.key in secure_keys:
+                applied.append(f"BLOCKED: {action.key} is SECURE")
+                continue
+            if action.key not in ai_allowed_keys:
+                applied.append(f"BLOCKED: {action.key} not AI-controlled")
+                continue
+            if action.new_target <= 0 or action.new_target > 10000:
+                applied.append(f"BLOCKED: target {action.new_target} out of range")
+                continue
+            with database.get_db_connection() as conn:
+                # Проверяем, что квест существует
+                row = conn.execute("SELECT key FROM global_registry WHERE key = ?", (action.key,)).fetchone()
+                if not row:
+                    applied.append(f"BLOCKED: quest '{action.key}' not found")
+                    continue
+                # Обновляем target_base в global_registry (для будущих rollover)
+                conn.execute("UPDATE global_registry SET target_base = ? WHERE key = ?", (float(action.new_target), action.key))
+                # Пересчитываем target под текущий уровень и обновляем daily_progress
+                scaled = math.floor(float(action.new_target) * (1 + (p["level"] - 1) * 0.08))
+                conn.execute("UPDATE daily_progress SET target = ? WHERE key = ?", (scaled, action.key))
+                conn.commit()
+            applied.append(f"TARGET {action.key.upper()} -> {action.new_target}")
+
+    return p, applied

@@ -3,16 +3,16 @@ from fastapi.middleware.cors import CORSMiddleware
 from contextlib import asynccontextmanager
 import sqlite3
 import datetime
-import re
 import math
 import ollama
 import database
 import services
+import json
 from schemas import (
     HunterStateModel, TrainRequest, QuestProgressRequest, 
     LanguageRequest, ChatRequest, AdminQuestModel,
     GateRaidRequest, ShadowExtractionRequest, ShadowDeployRequest, 
-    NameUpdateRequest
+    NameUpdateRequest, AgentResponse
 )
 
 @asynccontextmanager
@@ -30,11 +30,17 @@ app.add_middleware(
     allow_headers=["*"],
 )
 
+
 @app.get("/api/hunter", response_model=HunterStateModel)
 def get_hunter_full_state():
     p = database.load_profile_dict()
     p = services.check_daily_rollover(p)
     database.save_profile_dict(p)
+    
+    today_str = datetime.date.today().isoformat()
+    with database.get_db_connection() as conn:
+        row = conn.execute("SELECT COUNT(*) as c FROM gate_raids WHERE date = ?", (today_str,)).fetchone()
+        can_raid_today = (row["c"] == 0)
     
     quests = database.get_daily_progress_list()
     return {
@@ -45,7 +51,12 @@ def get_hunter_full_state():
         "shadowsOwned": p.get("shadows_owned", []),
         "activeShadow": p.get("active_shadow"), 
         "lastGateDate": p["last_gate_date"],
-        "daily": {"date": p["last_gate_date"], "penalty": bool(p["penalty"]), "quests": quests},
+        "canRaidToday": can_raid_today,
+        # ДОБАВЛЕНО: penalty-поля
+        "penaltyQuestKey": p.get("penalty_quest_key"),
+        "penaltyProgress": p.get("penalty_progress", 0.0),
+        "penaltyTarget": p.get("penalty_target", 0.0),
+        "daily": {"date": p.get("last_rollover_date"), "penalty": bool(p["penalty"]), "quests": quests},
         "weight": p.get("weight", 70.0), "height": p.get("height", 175.0), "age": p.get("age", 25), "fitness_goal": p.get("fitness_goal", "all-round")
     }
 
@@ -65,8 +76,8 @@ def train_stat(request: TrainRequest):
 @app.post("/api/quests/progress")
 def progress_quest(request: QuestProgressRequest):
     p = database.load_profile_dict()
-    p, msg = services.advance_quest_progress(p, request.quest_key, request.amount)    
-    if p["penalty"] == 0:
+    p, msg = services.advance_quest_progress(p, request.quest_key, request.amount)
+    if p["penalty"] == 0 and msg:
         p["system_message"] = msg
     database.save_profile_dict(p)
     return get_hunter_full_state()
@@ -94,9 +105,11 @@ def raid_gate(request: GateRaidRequest):
     """Маршрут рейда во Врата данжа со всеми расчетами на бэке"""
     p = database.load_profile_dict()
     today_str = datetime.date.today().isoformat()
-    
-    if p["last_gate_date"] == today_str:
-        raise HTTPException(status_code=400, detail="You have already raided a gate today!")
+
+    with database.get_db_connection() as conn:
+        row = conn.execute("SELECT COUNT(*) as c FROM gate_raids WHERE date = ?", (today_str,)).fetchone()
+        if row["c"] > 0:
+            raise HTTPException(status_code=400, detail="You have already raided a gate today!")
     if p["level"] < request.min_level:
         raise HTTPException(status_code=400, detail="Insufficient Hunter level!")
         
@@ -216,109 +229,102 @@ def get_chat_history():
 def system_chat(request: ChatRequest):
     p = database.load_profile_dict()
     timestamp = datetime.datetime.now().isoformat()
-    
-    # Инициализируем язык общения на основе первого слова сообщения (простая автопроверка)
-    user_msg_lower = request.message.lower()
-    has_cyrillic = bool(re.search('[а-яА-Я]', user_msg_lower))
-    chat_lang = "ru" if has_cyrillic else "en"
-    
-    # 1. Записываем текущую реплику охотника в лог БД
+
+    chat_lang = p.get("language", "ru")
+
+    # 1. Записываем реплику охотника
     with sqlite3.connect(database.DB_PATH) as conn:
         conn.execute("INSERT INTO chat_history (timestamp, sender, message_text) VALUES (?, 'hunter', ?)", (timestamp, request.message))
         conn.commit()
-        
-    # 2. ДИНАМИЧЕСКАЯ ВЫГРУЗКА ПРАВ ДОСТУПА КВЕСТОВ ИЗ SQLITE
+
+    # 2. Права доступа
     all_quests = database.get_all_global_quests()
     ai_allowed_keys = [q["key"] for q in all_quests if q.get("is_ai_controlled", 1) == 1]
     secure_keys = [q["key"] for q in all_quests if q.get("is_ai_controlled", 1) == 0]
-    
-    # 3. ФОРМИРОВАНИЕ СИСТЕМНОГО ПРОМПТА НА ОСНОВЕ ДАННЫХ ИЗ БД
+
+    # 3. Список текущих квестов для промпта
+    daily_quests = database.get_daily_progress_list()
+    quest_lines = []
+    for q in daily_quests:
+        unit = q["unit_ru"] if chat_lang == "ru" else q["unit_en"]
+        access = "SECURE" if q["key"] in secure_keys else "AI"
+        quest_lines.append(f"  - {q['key']}: {q['progress']}/{q['target']} {unit} [{access}]")
+    quest_info = "\n".join(quest_lines) if quest_lines else "  (none)"
+
+    # 4. Системный промпт
+    lang_name = "Russian" if chat_lang == "ru" else "English"
     system_prompt = (
-        f"You are the 'System' onboard AI and legendary personal fitness trainer from Solo Leveling. "
-        f"Your tone is cold, dominant, and absolute. Address the user strictly as 'Hunter'.\n"
-        f"CRITICAL RULE 1: Respond STRICTLY in the language of the last user message. If they speak Russian, respond in Russian. If English, respond in English.\n\n"
-        f"CURRENT HUNTER STATUS (DATABASE DATA):\n"
-        f"- Level: {p['level']} (Rank: {p['title_en'] if chat_lang == 'en' else p['title_ru']})\n"
-        f"- Specs: Age: {p['age']}, Weight: {p['weight']}kg, Height: {p['height']}cm.\n"
-        f"- Current Strategy Focus: {p['fitness_goal']}.\n\n"
-        f"DYNAMIC DIRECTIVES ACCESS (READ FROM SQLITE):\n"
-        f"- AI MANAGEMENT ALLOWED FOR KEYS: {', '.join(ai_allowed_keys) if ai_allowed_keys else 'None'}\n"
-        f"- AI ACCESS STRICTLY FORBIDDEN (SECURE SYSTEM DIRECTIVES): {', '.join(secure_keys) if secure_keys else 'None'}\n\n"
-        f"As an Elite Trainer, motivate the Hunter and push them past their limits. "
-        f"You can command progress tracking or database alterations by appending these service tokens at the very end of your response:\n"
-        f"1. To add progress to an ALLOWED quest: [ACTION:QUEST_KEY=AMOUNT] (e.g. [ACTION:pushups=15]).\n"
-        f"2. To scale target reps/difficulty up or down based on data: [ACTION:QUEST_KEY=AMOUNT].\n"
-        f"3. To completely inject a new training goal into the profile: [UPDATE_GOAL:new_focus_name].\n"
-        f"4. To generate a brand new training task: [AI_CREATE_QUEST:key=slug;label_ru=Название;label_en=Name;target=number;unit_ru=раз;unit_en=reps;type=stat_type].\n"
-        f"WARNING: Never issue tokens or touch keys listed in the SECURE list! Doing so violates System protocols. Keep responses short (max 3-4 sentences)."
+        f"You are the 'System' AI and legendary fitness trainer from Solo Leveling. "
+        f"Tone: cold, dominant, absolute. Address the user as 'Hunter'. "
+        f"Respond STRICTLY in {lang_name}.\n\n"
+        f"HUNTER PROFILE:\n"
+        f"- Level: {p['level']} ({p['title_ru'] if chat_lang == 'ru' else p['title_en']})\n"
+        f"- Age: {p['age']}, Weight: {p['weight']}kg, Height: {p['height']}cm\n"
+        f"- Fitness goal: {p['fitness_goal']}\n\n"
+        f"CURRENT DAILY QUESTS:\n{quest_info}\n\n"
+        f"AI-CONTROLLED KEYS (you may modify): {', '.join(ai_allowed_keys) if ai_allowed_keys else 'None'}\n"
+        f"SECURE KEYS (FORBIDDEN — never touch): {', '.join(secure_keys) if secure_keys else 'None'}\n\n"
+        f"You MUST respond with VALID JSON matching this schema:\n"
+        f'{{"reply": "your message to Hunter (2-4 sentences)", "actions": [ ... ]}}\n\n'
+        f"Action types:\n"
+        f'1. {{"type": "quest_progress", "key": "<key>", "amount": <number>}} — log progress. amount must be 0 < amount <= 1000.\n'
+        f'2. {{"type": "update_goal", "goal": "<goal>"}} — change fitness goal. Allowed: strength, agility, intelligence, dexterity, all-round, weight-loss, endurance.\n'
+        f'3. {{"type": "update_quest_target", "key": "<key>", "new_target": <number>}} — change target of an existing AI-controlled quest.\n'
+        f'4. {{"type": "create_quest", "key": "<slug>", "label_ru": "...", "label_en": "...", "target": <num>, "unit_ru": "...", "unit_en": "...", "quest_type": "strength|agility|intelligence|dexterity"}} — create new task.\n\n'
+        f"IMPORTANT RULES:\n"
+        f"- If the Hunter asks for a training program but you lack CRITICAL info "
+        f"(activity level, injuries, available equipment, or if profile data seems outdated), "
+        f"ASK 1-2 clarifying questions FIRST before creating/changing quests. "
+        f"Use an empty actions array in that case.\n"
+        f"- You already know age, weight, height, goal. Do NOT ask for these again unless the Hunter says they changed.\n"
+        f"- Never touch SECURE keys.\n"
+        f"- If no action is needed (e.g. you're just asking a question), use empty actions array.\n"
+        f"- Keep reply short (2-4 sentences).\n\n"
+        f"EXAMPLES:\n"
+        f'User: "I did 20 pushups"\n'
+        f'Assistant: {{"reply": "Logged, Hunter. 20 pushups. Keep pushing.", "actions": [{{"type": "quest_progress", "key": "pushups", "amount": 20}}]}}\n\n'
+        f'User: "Make me a training program"\n'
+        f'Assistant: {{"reply": "Before I design your regimen, Hunter — what is your current activity level, and do you have any injuries I should account for?", "actions": []}}\n\n'
+        f'User: "Set running to 10 km"\n'
+        f'Assistant: {{"reply": "Directive updated. Running target is now 10 km.", "actions": [{{"type": "update_quest_target", "key": "running", "new_target": 10}}]}}'
     )
 
     ollama_messages = [{'role': 'system', 'content': system_prompt}]
-    
-    # Выгружаем скользящее окно истории для памяти контекста
+
+    # История (скользящее окно 15)
     with database.get_db_connection() as conn:
         rows = conn.execute("SELECT sender, message_text FROM chat_history ORDER BY id DESC LIMIT 15").fetchall()
         for r in reversed(rows):
             role = 'user' if r["sender"] == 'hunter' else 'assistant'
             ollama_messages.append({'role': role, 'content': r["message_text"]})
-            
+
     try:
-        response = ollama.chat(model='qwen2.5:7b', messages=ollama_messages)
-        ai_reply = response['message']['content']
-        
-        # Парсинг команд [ACTION:...]
-        match_action = re.search(r"\[ACTION:\s*(\w+)\s*=\s*([\d\.]+)\]", ai_reply)
-        if match_action:
-            quest_key = match_action.group(1).strip()
-            amount = float(match_action.group(2).strip())
-            
-            # Проверка безопасности: не пытается ли ИИ взломать защищенный квест
-            if quest_key in secure_keys:
-                ai_reply = re.sub(r"\[ACTION:.*?\]", "", ai_reply).strip()
-                ai_reply += "\n\n[SYSTEM ERROR]: AI attempt to mutate SECURE directive blocked."
-            else:
-                p, msg = services.advance_quest_progress(p, quest_key, amount)
-                database.save_profile_dict(p)
-                ai_reply = re.sub(r"\[ACTION:.*?\]", "", ai_reply).strip()
-                ai_reply += f"\n\n[SYSTEM]: Telemetry synced. {quest_key.upper()} updated: +{amount}." if chat_lang == "en" else f"\n\n[СИСТЕМА]: Данные занесены в БД. Директива {quest_key.upper()} обновлена: +{amount}."
+        # ИЗМЕНЕНО: нативная JSON Schema вместо строки 'json'
+        from schemas import AgentResponse
+        response = ollama.chat(
+            model='qwen3:8b',
+            messages=ollama_messages,
+            format=AgentResponse.model_json_schema()
+        )
+        raw_reply = response['message']['content']
 
-        # Парсинг [UPDATE_GOAL:...]
-        match_goal = re.search(r"\[UPDATE_GOAL:\s*(\w+)\s*\]", ai_reply)
-        if match_goal:
-            new_goal = match_goal.group(1).strip()
-            p["fitness_goal"] = new_goal
+        parsed = services.parse_agent_response(raw_reply)
+        if not parsed:
+            ai_reply = raw_reply
+            applied = []
+        else:
+            ai_reply = parsed.reply
+            p, applied = services.apply_agent_actions(p, parsed.actions, ai_allowed_keys, secure_keys)
             database.save_profile_dict(p)
-            ai_reply = re.sub(r"\[UPDATE_GOAL:.*?\]", "", ai_reply).strip()
-            ai_reply += f"\n\n[SYSTEM]: Goal updated to {new_goal.upper()}." if chat_lang == "en" else f"\n\n[СИСТЕМА]: Фокус программы изменен на: {new_goal.upper()}."
 
-        # Парсинг [AI_CREATE_QUEST:...]
-        match_create = re.search(r"\[AI_CREATE_QUEST:(.*?)\]", ai_reply)
-        if match_create:
-            try:
-                raw_params = match_create.group(1).split(";")
-                params = {param.split("=").strip(): param.split("=").strip() for param in raw_params}
-                
-                with sqlite3.connect(database.DB_PATH) as conn:
-                    conn.execute("""
-                        INSERT OR REPLACE INTO global_registry (key, label_ru, label_en, target_base, unit_ru, unit_en, type, is_ai_controlled)
-                        VALUES (?, ?, ?, ?, ?, ?, ?, 1)
-                    """, (params["key"], params["label_ru"], params["label_en"], float(params["target"]), params["unit_ru"], params["unit_en"], params["type"]))
-                    
-                    scaled_target = math.floor(float(params["target"]) * (1 + (p["level"] - 1) * 0.08))
-                    conn.execute("INSERT OR REPLACE INTO daily_progress VALUES (?, 0.0, ?, 0)", (params["key"], scaled_target))
-                    conn.commit()
-                
-                ai_reply = re.sub(r"\[AI_CREATE_QUEST:.*?\]", "", ai_reply).strip()
-                ai_reply += f"\n\n[SYSTEM]: Generated new task {params['label_en']}." if chat_lang == "en" else f"\n\n[СИСТЕМА]: ИИ создал новую задачу: {params['label_ru']}."
-            except Exception as e:
-                ai_reply = re.sub(r"\[AI_CREATE_QUEST:.*?\]", "", ai_reply).strip()
+        if applied:
+            marker = "\n\n[СИСТЕМА]: " if chat_lang == "ru" else "\n\n[SYSTEM]: "
+            ai_reply += marker + " | ".join(applied)
 
-        # Записываем финальный ответ Системы в БД
         with sqlite3.connect(database.DB_PATH) as conn:
             conn.execute("INSERT INTO chat_history (timestamp, sender, message_text) VALUES (?, 'system', ?)", (datetime.datetime.now().isoformat(), ai_reply))
             conn.commit()
-            
-        return {"response": ai_reply}
-    except Exception as e:
-        return {"response": f"[SYSTEM ERROR]: Ollama offline. {str(e)}"}
 
+        return {"reply": ai_reply, "actions": applied}
+    except Exception as e:
+        return {"reply": f"[SYSTEM ERROR]: Ollama offline. {str(e)}", "actions": []}

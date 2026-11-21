@@ -10,7 +10,7 @@ import {
 import { Panel, Tag } from '@/components/Panel';
 import { useGame } from '@/game/GameProvider';
 import { GAME_MODEL } from '@/game/model';
-import { canEnterGate, totalStatWithShadows } from '@/game/engine';
+import { totalStatWithShadows } from '@/game/engine';
 import type { EncounterResult, GateDef } from '@/game/types';
 
 const RANK_COLOR: Record<string, string> = {
@@ -27,7 +27,6 @@ export function Gates() {
   const [result, setResult] = useState<{ gate: GateDef; outcome: EncounterResult } | null>(null);
   const [busy, setBusy] = useState(false);
 
-  // Compute success chance live for display.
   const chances = useMemo(() => {
     const map: Record<string, number> = {};
     for (const g of GAME_MODEL.gates) {
@@ -39,27 +38,16 @@ export function Gates() {
     return map;
   }, [state]);
 
-  const handleEnter = (gate: GateDef) => {
-    if (!canEnterGate(state, gate)) return;
+  // ИЗМЕНЕНО: handleEnter использует РЕЗУЛЬТАТ С БЭКА (как в прошлом патче).
+  const handleEnter = async (gate: GateDef) => {
+    // ИЗМЕНЕНО: проверяем только уровень. canRaidToday — в disabled кнопки.
+    if (state.level < gate.minLevel) return;
     setBusy(true);
-    // Short delay for "entering" feel.
-    setTimeout(() => {
-      enterGate(gate);
-      // Re-derive the outcome for the narrative panel by simulating with current state.
-      // The engine already mutated state; we surface a representative outcome.
-      const success = Math.random() < chances[gate.rank];
-      const narrative = gate.encounters[Math.floor(Math.random() * gate.encounters.length)];
-      const outcome: EncounterResult = success
-        ? { success: true, narrative, gold: gate.goldReward, xp: gate.xpReward }
-        : {
-            success: false,
-            narrative: `${narrative} ...but the gate turns against you. You retreat, wounded.`,
-            gold: -Math.round(gate.goldReward * 0.25),
-            xp: 0,
-          };
+    const outcome = await enterGate(gate);
+    if (outcome) {
       setResult({ gate, outcome });
-      setBusy(false);
-    }, 650);
+    }
+    setBusy(false);
   };
 
   return (
@@ -77,7 +65,8 @@ export function Gates() {
         <div className="grid grid-cols-1 gap-3 sm:grid-cols-2">
           {GAME_MODEL.gates.map((g) => {
             const locked = state.level < g.minLevel;
-            const usedToday = state.lastGateDate === new Date().toISOString().slice(0, 10);
+            // ИЗМЕНЕНО: usedToday берётся с бэка (canRaidToday), а не сравнивается с lastGateDate.
+            const usedToday = !state.canRaidToday;
             const disabled = locked || usedToday || busy;
             const chance = chances[g.rank];
             return (
@@ -150,7 +139,6 @@ export function Gates() {
         </div>
       </Panel>
 
-      {/* Encounter log */}
       <Panel title="Encounter Log" code="ENC-01">
         {result ? (
           <div

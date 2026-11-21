@@ -1,7 +1,7 @@
 import { createContext, useCallback, useContext, useEffect, useRef, useState } from 'react';
-import type { HunterState, QuestKey, StatKey } from '@/game/types';
+import type { EncounterResult, GateDef, HunterState, QuestKey, StatKey } from '@/game/types';
 import { freshHunter, enterGate as enterGateEngine, buyShadow as buyShadowEngine, setActiveShadow as setActiveShadowEngine } from '@/game/engine';
-import type { GateDef } from '@/game/types';
+
 
 const API_URL = 'http://127.0.0.1:8000/api';
 
@@ -22,7 +22,7 @@ interface GameApi {
   incrementStat: (key: StatKey) => void;
   advanceQuest: (key: QuestKey, amount: number) => void;
   clearPenalty: () => void;
-  enterGate: (gate: GateDef) => void;
+  enterGate: (gate: GateDef) => Promise<EncounterResult | null>;
   buyShadow: (shadowId: string) => void;
   setActiveShadow: (shadowId: string | null) => void;
   reset: () => void;
@@ -119,8 +119,7 @@ export function GameProvider({ children }: { children: React.ReactNode }) {
         }
       } catch (err) { console.error(err); }
     },
-    
-    // ИСПРАВЛЕНО: Безопасный вызов серверного расчета рейда Врат данжа
+        
     enterGate: async (gate) => {
       try {
         const res = await fetch(`${API_URL}/gates/raid`, {
@@ -136,20 +135,32 @@ export function GameProvider({ children }: { children: React.ReactNode }) {
             success_rate_base: gate.successRateBase
           })
         });
-        
+
+        // ИЗМЕНЕНО: возвращаем outcome с бэка (а не только setState).
+        // Это чинит «два разных результата» в Gates.tsx: фронт больше не симулирует.
         if (res.ok) {
           const data = await res.json();
-          setState(data.state); // Синхронизируем состояние Охотника из БД
-          
-          // Выводим красивый тост-результат на основе серверного рандома!
+          setState(data.state);
           pushToast({
             title: data.outcome.success ? 'GATE CLEARED' : 'GATE FAILED',
             body: data.outcome.narrative,
             tone: data.outcome.success ? 'success' : 'danger'
           });
+          return data.outcome;
         }
+
+        // ДОБАВЛЕНО: обработка ошибок бэка (400 — уже рейдил, недостаточный уровень и т.д.)
+        let detail = 'Raid failed';
+        try {
+          const errData = await res.json();
+          detail = errData.detail || detail;
+        } catch { /* ignore */ }
+        pushToast({ title: 'RAID REJECTED', body: detail, tone: 'warn' });
+        return null;
       } catch (err) {
         console.error("Сбой штурма Врат данжа", err);
+        pushToast({ title: 'NETWORK ERROR', body: 'Failed to contact System core.', tone: 'danger' });
+        return null;
       }
     },
 

@@ -24,6 +24,8 @@ def init_db():
         """)
         
         # 2. Базовые характеристики Охотника
+        # ИЗМЕНЕНО: добавлены penalty_quest_key, penalty_progress, penalty_target —
+        # penalty-состояние вынесено из system_message в отдельные поля.
         cursor.execute("""
             CREATE TABLE IF NOT EXISTS hunter_profile (
                 id INTEGER PRIMARY KEY,
@@ -31,7 +33,11 @@ def init_db():
                 stat_points INTEGER, title_ru TEXT, title_en TEXT, language TEXT, penalty INTEGER,
                 strength INTEGER, agility INTEGER, intelligence INTEGER, dexterity INTEGER,
                 system_message TEXT, last_gate_date TEXT, active_shadow TEXT,
-                weight REAL, height REAL, age INTEGER, fitness_goal TEXT
+                weight REAL, height REAL, age INTEGER, fitness_goal TEXT,
+                last_rollover_date TEXT,
+                penalty_quest_key TEXT,
+                penalty_progress REAL DEFAULT 0,
+                penalty_target REAL DEFAULT 0
             )
         """)
         
@@ -69,6 +75,18 @@ def init_db():
                 id INTEGER PRIMARY KEY AUTOINCREMENT, timestamp TEXT, sender TEXT, message_text TEXT
             )
         """)
+                       
+        # ДОБАВЛЕНО: обратная совместимость — если penalty=1 и system_message в формате PENALTY_ACTIVE:...,
+        # переносим значения в новые поля, а system_message очищаем.
+        cursor.execute("SELECT penalty, system_message FROM hunter_profile WHERE id = 1")
+        row = cursor.fetchone()
+        if row and row[0] == 1 and row[1] and row[1].startswith("PENALTY_ACTIVE:"):
+            parts = row[1].split(":")
+            if len(parts) == 4:
+                cursor.execute(
+                    "UPDATE hunter_profile SET penalty_quest_key = ?, penalty_progress = ?, penalty_target = ?, system_message = ? WHERE id = 1",
+                    (parts[1], float(parts[2]), float(parts[3]), "Penalty active. Complete the task.")
+                )
         
         # Заполняем дефолтные квесты
         cursor.execute("SELECT COUNT(*) FROM global_registry")
@@ -81,18 +99,23 @@ def init_db():
             ]
             cursor.executemany("INSERT INTO global_registry (key, label_ru, label_en, target_base, unit_ru, unit_en, type, is_ai_controlled) VALUES (?,?,?,?,?,?,?,?)", defaults)
             
-        # Заполняем базовый профиль        
+        # Заполняем базовый профиль
         cursor.execute("SELECT COUNT(*) FROM hunter_profile")
         if cursor.fetchone()[0] == 0:
             cursor.execute("""
-                INSERT INTO hunter_profile VALUES (
+                INSERT INTO hunter_profile (
+                    id, name, level, xp, xp_needed, gold, stat_points, title_ru, title_en, language, penalty,
+                    strength, agility, intelligence, dexterity, system_message, last_gate_date, active_shadow,
+                    weight, height, age, fitness_goal, last_rollover_date,
+                    penalty_quest_key, penalty_progress, penalty_target
+                ) VALUES (
                     1, 'Sung Jinwoo', 1, 0, 100, 100, 5, 'Охотник E-ранга', 'E-Rank Hunter', 'ru', 0,
                     10, 10, 10, 10, 'System initialized.', NULL, NULL,
-                    70.0, 170.0, 25, 'all-round'
+                    70.0, 170.0, 25, 'all-round', NULL,
+                    NULL, 0.0, 0.0
                 )
             """)
-        conn.commit()
-    
+        conn.commit()    
 
 
 def load_profile_dict() -> dict:
@@ -113,11 +136,13 @@ def save_profile_dict(p: dict):
             UPDATE hunter_profile SET
                 name = ?, level=?, xp=?, xp_needed=?, gold=?, stat_points=?, title_ru=?, title_en=?,
                 language=?, penalty=?, strength=?, agility=?, intelligence=?, dexterity=?,
-                system_message=?, last_gate_date=?, active_shadow=?, weight=?, height=?, age=?, fitness_goal=?
+                system_message=?, last_gate_date=?, active_shadow=?, weight=?, height=?, age=?, fitness_goal=?,
+                last_rollover_date=?, penalty_quest_key=?, penalty_progress=?, penalty_target=?
             WHERE id = 1
         """, (p["name"], p["level"], p["xp"], p["xp_needed"], p["gold"], p["stat_points"], p["title_ru"], p["title_en"],
               p["language"], p["penalty"], p["strength"], p["agility"], p["intelligence"], p["dexterity"],
-              p["system_message"], p["last_gate_date"], p.get("active_shadow"), p["weight"], p["height"], p["age"], p["fitness_goal"]))
+              p["system_message"], p["last_gate_date"], p.get("active_shadow"), p["weight"], p["height"], p["age"], p["fitness_goal"],
+              p.get("last_rollover_date"), p.get("penalty_quest_key"), p.get("penalty_progress", 0.0), p.get("penalty_target", 0.0)))
         conn.commit()
 
 def get_all_global_quests() -> list:
